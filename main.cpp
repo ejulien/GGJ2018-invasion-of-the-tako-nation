@@ -278,8 +278,8 @@ void PlayerCollidePlayfield(Player &player) {
 		sfx = true;
 	}
 
-	//	if (sfx)
-	//		g_plus.get().GetMixer()->Start(*bidon);
+	if (sfx)
+		g_plus.get().GetMixer()->Start(*bidon);
 }
 
 void PlayerCollidePlayer(Player &a, Player &b) {
@@ -293,7 +293,7 @@ void PlayerCollidePlayer(Player &a, Player &b) {
 		b.spd += v;
 		a.spd -= v;
 
-		//		g_plus.get().GetMixer()->Start(*bidon);
+		g_plus.get().GetMixer()->Start(*bidon);
 	}
 }
 
