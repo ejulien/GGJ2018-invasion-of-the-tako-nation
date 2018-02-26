@@ -108,7 +108,7 @@ void ShakeBG(float strength);
 
 //
 bool IsFading();
-void FadeTo(const Color &col, time_ns duratio = time_from_sec_f(0.25f));
+void FadeTo(const Color &col, time_ns duration = time_from_sec_f(0.25f));
 void SetFade(const Color &col);
 
 //
@@ -123,14 +123,106 @@ struct Player {
 	bool ai{true};
 	float ai_angle{0};
 	time_ns ai_shot_delay{0};
+
+	int gamepad{-1};
 };
 
 std::array<Player, 4> players;
-std::array<std::shared_ptr<InputDevice>, 4> gamepads;
+
+//
+enum GameInputType {
+	Gamepad,
+	Keyboard
+};
+
+int GetNextPlayer() {
+	for (size_t i = 0; players.size(); i++)
+		if (players[i].ai)
+			return i;
+	return -1;
+}
+
+struct GameDevice {
+	std::shared_ptr<InputDevice> device;
+	GameInputType type;
+	float angle;
+
+	int keys_cfg;
+};
+
+std::array<GameDevice, 8> gamepads;
+
+std::array<std::array<hg::Key, 3>, 5> keyboard_configs{ {
+	{ KeyZ, KeyQ, KeyD },
+	{ KeyI, KeyJ, KeyL },
+	{ KeyUp, KeyLeft, KeyRight },
+	{ KeyNumpad8, KeyNumpad4, KeyNumpad6 },
+	{ KeyW, KeyA, KeyD }
+	} };
+
+
+void InitGamepadDevice(GameDevice &gamepadDevice, std::shared_ptr<InputDevice> device, GameInputType type) {
+	gamepadDevice.angle = 0;
+	gamepadDevice.device = device;
+	gamepadDevice.type = type;
+}
+
+void InitKeyboardDevice(GameDevice &keyboardDevice, std::shared_ptr<InputDevice> device, GameInputType type, int keys_cfg) {
+	keyboardDevice.angle = 0;
+	keyboardDevice.device = device;
+	keyboardDevice.type = type;
+	keyboardDevice.keys_cfg = keys_cfg;
+}
+
+bool KeyboardTestInput(GameDevice &keyboardDevice, int btn_idx, bool(*test)(GameDevice&, hg::Key)) {
+	hg::Key input = keyboard_configs[keyboardDevice.keys_cfg][btn_idx];
+	return test(keyboardDevice, input);
+}
+
+bool KeyboardInputWasDown(GameDevice &keyboardDevice, int btn_idx) {
+	auto test = [](GameDevice &keyboardDevice, hg::Key btn) {return keyboardDevice.device->WasDown(btn); };
+	return KeyboardTestInput(keyboardDevice, btn_idx, test);
+}
+
+bool KeyboardInputWasPressed(GameDevice &keyboardDevice, int btn_idx) {
+	auto test = [](GameDevice &keyboardDevice, hg::Key btn) {return keyboardDevice.device->WasPressed(btn); };
+	return KeyboardTestInput(keyboardDevice, btn_idx, test);
+}
+
+bool InputDeviceWasButtonPressed(GameDevice &device) {
+	if (device.type == Gamepad) {
+		if (device.device->WasButtonPressed(Button0))
+			return true;
+	} else if (device.type == Keyboard) {
+		if (KeyboardInputWasPressed(device, 0))
+			return true;
+	}
+	return false;
+}
+
+float InputDeviceGetAngle(GameDevice &device) {
+	if (device.type == Gamepad) {
+		Vector2 v{ device.device->GetValue(InputAxisX), device.device->GetValue(InputAxisY) };
+		auto l = v.Len();
+
+		if (l > 0.25f) {
+			v /= l;
+			device.angle = atan2(v.y, v.x);
+		}
+	} else if (device.type == Keyboard) {
+		if (KeyboardInputWasDown(device, 1))
+			device.angle -= 0.2f;
+
+		if (KeyboardInputWasDown(device, 2))
+			device.angle += 0.2f;
+	}
+	return device.angle;
+}
+//
 
 int AnyButtonPressed() {
-	for (int i = 0; i < gamepads.size(); ++i)
-		if (gamepads[i]->WasButtonPressed(Button0))
+	for (size_t i = 0; i < gamepads.size(); ++i)
+		if (InputDeviceWasButtonPressed(gamepads[i]))
 			return i;
 	return -1;
 }
@@ -155,7 +247,7 @@ float aaa = 0;
 
 void DrawText2DCentered(float x, float y, const std::string &text, float size = 16, Color color = Color::White, const char *font_path = "") {
 	auto rect = g_plus.get().GetTextRect(text, size, font_path);
-	g_plus.get().Text2D(x - rect.GetWidth() / 2, y + rect.GetHeight() / 2, text, size, color, font_path);
+	g_plus.get().Text2D(x - rect.GetWidth() / 2, y + rect.GetHeight() / 2, text.c_str(), size, color, font_path);
 }
 
 void SetPlayerMessage(Player &player, const char *msg) {
@@ -166,7 +258,7 @@ void SetPlayerMessage(Player &player, const char *msg) {
 void DrawPlayerMessage(Player &player) {
 	if (player.msg_delay > 0) {
 		float x = player.pos.x, y = player.pos.y + 38.f;
-		auto alpha = Clamp<float>(float(player.msg_delay) / time_from_sec_f(0.2));
+		auto alpha = Clamp<float>(float(player.msg_delay) / time_from_sec_f(0.2f));
 
 		DrawText2DCentered(x, y, player.msg.c_str(), 18.f, Color(0, 0, 0, 0.5f * alpha), "@data:komikax.ttf");
 		DrawText2DCentered(x - 2, y + 2, player.msg.c_str(), 18.f, Color(1, 1, 1, 1 * alpha), "@data:komikax.ttf");
@@ -307,19 +399,13 @@ void UpdatePlayersCollision() {
 		PlayerCollidePlayfield(player);
 }
 
-void UpdatePlayerInputs(int idx, InputDevice &device) {
+void UpdatePlayerInputs(int idx, GameDevice &device) {
 	auto &player = players[idx];
 
 	if (!player.ai) {
-		Vector2 v{device.GetValue(InputAxisX), device.GetValue(InputAxisY)};
-		auto l = v.Len();
+		player.angle = InputDeviceGetAngle(device);
 
-		if (l > 0.25f) {
-			v /= l;
-			player.angle = atan2(v.y, v.x);
-		}
-
-		if (gamepads[idx]->WasButtonPressed(Button0)) {
+		if (InputDeviceWasButtonPressed(device)) {
 			auto shots = GetPlayerShoots(idx);
 			if (shots.size() > 0)
 				PlayerFireShot(idx, shots[0]);
@@ -382,7 +468,7 @@ Vector2 GetEarthPos() { return Vector2(width / 2.f, height - 120.f); }
 void DrawEarthMessage() {
 	if (earth_msg_duration > 0) {
 		auto pos = GetEarthPos();
-		auto alpha = Clamp<float>(float(earth_msg_duration) / time_from_sec_f(0.2));
+		auto alpha = Clamp<float>(float(earth_msg_duration) / time_from_sec_f(0.2f));
 
 		DrawText2DCentered(pos.x, pos.y, earth_msg.c_str(), 64.f, Color(0, 0, 0, 0.75f * alpha), "@data:komikax.ttf");
 		DrawText2DCentered(pos.x - 8, pos.y + 8, earth_msg.c_str(), 64.f, Color(1, 1, 1, 1 * alpha), "@data:komikax.ttf");
@@ -399,7 +485,7 @@ void SetAlienMessage(const char *msg) {
 	alien_msg_duration = time_from_sec(2);
 }
 
-Vector2 GetAlienPos() {
+Vector2 GetAlienPos() { 
 	float x = width / 2.f, y = 60.f;
 
 	auto offset = FRRand(-4.f, 4.f);
@@ -409,10 +495,10 @@ Vector2 GetAlienPos() {
 	return Vector2(x, y);
 }
 
-void DrawAlienMessage() {
+void DrawAlienMessage() { 
 	if (alien_msg_duration > 0) {
 		auto pos = GetAlienPos();
-		auto alpha = Clamp<float>(float(alien_msg_duration) / time_from_sec_f(0.2));
+		auto alpha = Clamp<float>(float(alien_msg_duration) / time_from_sec_f(0.2f));
 
 		DrawText2DCentered(pos.x, pos.y, alien_msg.c_str(), 64.f, Color(0, 0, 0, 0.75f * alpha), "@data:komikax.ttf");
 		DrawText2DCentered(pos.x - 8, pos.y + 8, alien_msg.c_str(), 64.f, Color(1, 0, 0, 1 * alpha), "@data:komikax.ttf");
@@ -450,7 +536,7 @@ void UpdateShoot(int idx) {
 					shoot.hold_until = shoot_hold_duration;
 					player.spd += shoot.spd * shoot_to_player_transfer_coef;
 
-					SpawnFX(player.pos.x, player.pos.y, "@data:fx_donut.png", 200.f, 0, time_from_sec_f(0.2), 0, Color(1, 1, 1, 0.75f), 8.f);
+					SpawnFX(player.pos.x, player.pos.y, "@data:fx_donut.png", 200.f, 0, time_from_sec_f(0.2f), 0, Color(1, 1, 1, 0.75f), 8.f);
 				}
 			}
 		}
@@ -506,7 +592,7 @@ void UpdateShoot(int idx) {
 }
 
 void UpdateShoots() {
-	for (int i = 0; i < shoots.size(); ++i)
+	for (size_t i = 0; i < shoots.size(); ++i)
 		UpdateShoot(i);
 }
 
@@ -571,7 +657,7 @@ void DrawBG() {
 	float a = time_to_sec_f(g_plus.get().GetClock());
 	float alien_x = Cos(a * 0.75f) * 25.f;
 
-	g_plus.get().Image2D(alien_x, -(100 - alien_health), 1, "@data:tentacles.png");
+	g_plus.get().Image2D(alien_x, float(-(100 - alien_health)), 1, "@data:tentacles.png");
 }
 
 struct FX {
@@ -606,7 +692,7 @@ void DrawFXs() {
 	fxs.erase(std::remove_if(fxs.begin(), fxs.end(), [](const FX &fx) { return fx.duration < 0; }), fxs.end());
 }
 
-void SpawnFX(float x, float y, const char *img, float size, float rotation, time_ns duration, time_ns delay, Color color, float size_spd) {
+void SpawnFX(float x, float y, const char *img, float size, float rotation, time_ns duration, time_ns delay, Color color, float size_spd) {/////
 	FX fx;
 	fx.img = img;
 	fx.pos = Vector2(x, y);
@@ -627,14 +713,14 @@ void FullscreenQuad(const Color &color) {
 	g_plus.get().Quad2D(0, 0, 0, height, width, height, width, 0, color, color, color, color);
 }
 
-bool IsFading() { return fade_duration > 0; }
+bool IsFading() { return fade_duration > 0; } 
 
-void FadeTo(const Color &col, time_ns duration) {
+void FadeTo(const Color &col, time_ns duration) { 
 	fade_to = col;
 	fade_t = fade_duration = duration;
 }
 
-void SetFade(const Color &col) { fade_color = col; }
+void SetFade(const Color &col) { fade_color = col; } 
 
 void DrawFade() {
 	Color col;
@@ -688,7 +774,9 @@ void GameLoopCommon() {
 	UpdatePlayersCollision();
 
 	for (size_t i = 0; i < players.size(); ++i) {
-		UpdatePlayerInputs(i, *gamepads[i]);
+		int playerGamepadIdx = players[i].gamepad;
+		if (playerGamepadIdx != -1)
+			UpdatePlayerInputs(i, gamepads[players[i].gamepad]);
 		UpdatePlayer(i);
 		DrawPlayer(i, players_color[i]);
 	}
@@ -795,7 +883,7 @@ time_ns how_to_play_time;
 bool how_to_play_can_start_game;
 std::function<bool()> how_to_play_branch_to;
 
-bool HowToPlayWaitFade() {
+bool HowToPlayWaitFade() { 
 	g_plus.get().Image2D(0, 0, 1, "@data:default_screen.jpg");
 	g_plus.get().Image2D(0, 0, 1, "@data:how_to_play_02.png");
 
@@ -806,7 +894,7 @@ bool HowToPlayWaitFade() {
 	return false;
 }
 
-bool HowToPlayScreen() {
+bool HowToPlayScreen() { 
 	g_plus.get().Image2D(0, 0, 1, "@data:default_screen.jpg");
 
 	if (how_to_play_time > time_from_sec(8)) {
@@ -841,7 +929,7 @@ bool HowToPlay() {
 //
 time_ns join_delay;
 
-void DrawPlayerJoinScreen() {
+void DrawPlayerJoinScreen() { 
 	g_plus.get().Image2D(0, 0, 1, "@data:default_screen.jpg");
 	g_plus.get().Image2D(0, 0, 1, "@data:join_overlay.png");
 
@@ -857,10 +945,10 @@ void DrawPlayerJoinScreen() {
 	DrawText2DCentered(width / 4 * 3, height / 4 - 120.f, players[2].ai ? "Join now!" : "Get ready!", 48.f, players_color[2], "@data:impact.ttf");
 	DrawText2DCentered(width / 4 * 3, height / 4 * 3 - 120.f, players[3].ai ? "Join now!" : "Get ready!", 48.f, players_color[3], "@data:impact.ttf");
 
-	DrawText2DCentered(width / 2, height / 2 - 160.f, format("%1").arg(time_to_sec(join_delay)), 190.f, Color::White, "@data:komikax.ttf");
+	DrawText2DCentered(width / 2, height / 2 - 160.f, format("%1").arg(time_to_sec(join_delay)).c_str(), 190.f, Color::White, "@data:komikax.ttf");
 }
 
-bool WaitJoinFadeOut() {
+bool WaitJoinFadeOut() { 
 	DrawPlayerJoinScreen();
 
 	if (!IsFading()) {
@@ -871,15 +959,37 @@ bool WaitJoinFadeOut() {
 	return false;
 }
 
-bool PlayerJoinScreen() {
+int GetPlayerIdxUsingGamepad(int pad_idx) {
+	for (size_t i = 0; i < players.size(); i++) {
+		if (players[i].gamepad == pad_idx){
+			return i;
+		}
+	}
+	return -1;
+}
+
+void RegisterNewHumanPlayer(int pad_idx) {
+	int next_player_idx = GetNextPlayer();
+	if (next_player_idx != -1) {
+		g_plus.get().GetMixer()->Start(*beep);
+
+		Player *player = &players[next_player_idx];
+		player->ai = false;
+		player->gamepad = pad_idx;
+	}
+};
+
+bool PlayerJoinScreen() { 
 	DrawPlayerJoinScreen();
 
-	int player_idx = AnyButtonPressed();
-	if (player_idx != -1) {
-		if (players[player_idx].ai) {
-			g_plus.get().GetMixer()->Start(*beep);
-			players[player_idx].ai = false; // player controlled
-		} else {
+	int pad_idx = AnyButtonPressed();
+	if (pad_idx != -1) {
+		int player = GetPlayerIdxUsingGamepad(pad_idx);
+
+		if (player == -1) {
+			RegisterNewHumanPlayer(pad_idx);// player controlled
+		}
+		else {
 			join_delay -= time_from_sec(1);
 		}
 	}
@@ -911,16 +1021,15 @@ void InitJoinScreen() {
 }
 
 //
-bool DetectGameStart() {
-	int player_idx = AnyButtonPressed();
+bool DetectGameStart() { 
+	int pad_idx = AnyButtonPressed();
 
-	if (player_idx != -1) {
-		g_plus.get().GetMixer()->Start(*beep);
+	if (pad_idx != -1) {
 
 		for (auto &player : players)
 			player.ai = true; // CPU controlled
 
-		players[player_idx].ai = false; // player controlled
+		RegisterNewHumanPlayer(pad_idx); // player controlled
 
 		InitJoinScreen();
 		next_game_state = &PlayerJoinScreen;
@@ -977,7 +1086,7 @@ bool TitleWaitFadeOut() {
 	return false;
 }
 
-bool IntroAndTitleScreen() {
+bool IntroAndTitleScreen() { 
 	if (DetectGameStart())
 		return true;
 
@@ -1005,7 +1114,7 @@ bool IntroAndTitleScreen() {
 }
 
 //
-bool Title() {
+bool Title() { 
 	SetFade(Color(0, 0, 0, 1));
 	FadeTo(Color(0, 0, 0, 0), time_from_sec(6));
 
@@ -1019,18 +1128,16 @@ bool Title() {
 	return true;
 }
 
-//
 bool SetupGamepads() {
-	gamepads[0] = g_input_system.get().GetDevice("xinput.port0");
-	gamepads[1] = g_input_system.get().GetDevice("xinput.port1");
-	gamepads[2] = g_input_system.get().GetDevice("xinput.port2");
-	gamepads[3] = g_input_system.get().GetDevice("xinput.port3");
+	InitGamepadDevice(gamepads[0], g_input_system.get().GetDevice("xinput.port0"), Gamepad);
+	InitGamepadDevice(gamepads[1], g_input_system.get().GetDevice("xinput.port1"), Gamepad);
+	InitGamepadDevice(gamepads[2], g_input_system.get().GetDevice("xinput.port2"), Gamepad);
+	InitGamepadDevice(gamepads[3], g_input_system.get().GetDevice("xinput.port3"), Gamepad);
 
-	if (!gamepads[0] || !gamepads[1] || !gamepads[2] || !gamepads[3]) {
-		error("No XInput support, falling back to keyboard");
-		for (int i = 0; i < 4; ++i)
-			gamepads[i] = g_input_system.get().GetDevice("keyboard");
-	}
+	InitKeyboardDevice(gamepads[4], g_input_system.get().GetDevice("keyboard"), Keyboard, 0);
+	InitKeyboardDevice(gamepads[5], g_input_system.get().GetDevice("keyboard"), Keyboard, 1);
+	InitKeyboardDevice(gamepads[6], g_input_system.get().GetDevice("keyboard"), Keyboard, 2);
+	InitKeyboardDevice(gamepads[7], g_input_system.get().GetDevice("keyboard"), Keyboard, 3);
 	return true;
 }
 
